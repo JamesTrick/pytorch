@@ -11,12 +11,21 @@
 #include <c10d/Store.hpp>
 #include <torch/csrc/distributed/rpc/rpc_agent.h>
 
+#include <tensorpipe/tensorpipe.h>
+
 // Forward-declare the TensorPipe classes we need, to avoid including its
 // headers in PyTorch's ones and thus have it become a public dependency.
 
 namespace tensorpipe {
 
+#define TENSORPIPE_USE_CUDA_IPC_CHANNEL TENSORPIPE_HAS_CUDA_IPC_CHANNEL && defined(USE_CUDA)
+
 class CpuBuffer;
+
+#if TENSORPIPE_USE_CUDA_IPC_CHANNEL
+class CudaBuffer;
+#endif
+
 class Context;
 class Error;
 class Listener;
@@ -34,6 +43,11 @@ namespace channel {
 template <typename TBuffer>
 class Context;
 using CpuContext = Context<CpuBuffer>;
+
+#if TENSORPIPE_USE_CUDA_IPC_CHANNEL
+using CudaContext = Context<CudaBuffer>;
+#endif
+
 } // namespace channel
 
 using DeviceMap = std::unordered_map<c10::DeviceIndex, c10::DeviceIndex>;
@@ -53,14 +67,27 @@ struct TransportRegistration {
   std::string address;
 };
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 C10_DECLARE_REGISTRY(TensorPipeTransportRegistry, TransportRegistration);
 
-struct ChannelRegistration {
+struct CpuChannelRegistration {
   std::shared_ptr<tensorpipe::channel::CpuContext> channel;
   int64_t priority;
 };
 
-C10_DECLARE_REGISTRY(TensorPipeChannelRegistry, ChannelRegistration);
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+C10_DECLARE_REGISTRY(TensorPipeCpuChannelRegistry, CpuChannelRegistration);
+
+struct CudaChannelRegistration {
+#if TENSORPIPE_USE_CUDA_IPC_CHANNEL
+  std::shared_ptr<tensorpipe::channel::CudaContext> channel;
+  int64_t priority;
+#endif
+};
+
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+C10_DECLARE_REGISTRY(TensorPipeCudaChannelRegistry, CudaChannelRegistration);
+
 
 constexpr auto kDefaultNumWorkerThreads = 16;
 
@@ -94,7 +121,8 @@ struct TensorPipeRpcBackendOptions : public RpcBackendOptions {
     if (channels.has_value()) {
       for (const std::string& channelName : channels.value()) {
         TORCH_CHECK(
-            TensorPipeChannelRegistry()->Has(channelName),
+            TensorPipeCudaChannelRegistry()->Has(channelName) ||
+                TensorPipeCpuChannelRegistry()->Has(channelName),
             "Unknown channel: ",
             channelName);
       }
